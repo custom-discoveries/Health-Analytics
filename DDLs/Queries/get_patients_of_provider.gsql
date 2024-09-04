@@ -1,0 +1,30 @@
+CREATE QUERY get_patients_of_provider(VERTEX<Provider> input_provider) { 
+/*
+    Get the Patients of a given Provider
+
+    Sample inputs:
+    input_provider: pro6 | pro30 | pro13
+
+    Starting with the "input_provider",
+    (1) Find claims linked to the input presciber:
+        Provider -(<submitted_by)- Claim
+    (2) Then find Patients linked to those claims:
+        Claim 0(associated>) - Patient
+    (2) Print the connected patients and all the edges along the connecting
+    paths.
+*/
+
+    ListAccum<EDGE> @@edge_list;
+
+    start = {input_provider};
+
+    claims = SELECT t FROM start:s-(<submitted_by:e)-:t
+        ACCUM @@edge_list += e;
+
+    patients = SELECT t FROM claims:s-(associated>:e)-:t
+        ACCUM @@edge_list +=e;
+
+    PRINT patients.size();
+    PRINT patients, @@edge_list;
+
+}

@@ -1,0 +1,23 @@
+#
+# Example of loading Vertex from one data load file
+#
+Use Graph Health_Analytics_Graph
+DROP JOB Health_Analytics_Graph_Vertex_Job
+CREATE LOADING JOB  Health_Analytics_Graph_Vertex_Job FOR GRAPH  Health_Analytics_Graph {
+DEFINE FILENAME DS1 = "./GraphData/claim.csv";
+DEFINE FILENAME DS2 = "./GraphData/claim_associated_with_patient.csv";
+DEFINE FILENAME DS3 = "./GraphData/claim_submitted_by_provider.csv";
+DEFINE FILENAME DS4 = "./GraphData/specialties_subspecialties.csv";
+
+  LOAD DS1 TO VERTEX Claim VALUES($0,$1,$2,$4,$6) USING SEPARATOR=",", HEADER="true", QUOTE="double", EOL="\n";
+  LOAD DS2 TO VERTEX Patient VALUES($1) USING SEPARATOR=",", HEADER="true", QUOTE="double", EOL="\n";
+  LOAD DS3 TO VERTEX Provider VALUES($1,_,_) USING SEPARATOR=",", HEADER="true", QUOTE="double", EOL="\n";
+  LOAD DS4 TO VERTEX Specialty VALUES($0) USING SEPARATOR=",", HEADER="true", QUOTE="double", EOL="\n";
+  LOAD DS4 TO VERTEX SubSpecialty VALUES($1) USING SEPARATOR=",", HEADER="true", QUOTE="double", EOL="\n";
+
+}
+#run the Vertex loading job
+RUN LOADING JOB Health_Analytics_Graph_Vertex_Job
+
+#drop the job, indicating the job is completed
+DROP JOB Health_Analytics_Graph_Vertex_Job

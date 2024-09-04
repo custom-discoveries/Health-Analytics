@@ -1,0 +1,359 @@
+CREATE QUERY algo_louvain(INT iter1 = 10, INT iter2 = 10,
+    INT iter3 = 10, INT split = 10, INT output_level = 0,
+    BOOL print_accum = TRUE, BOOL result_attr = TRUE, STRING file_path = "",
+    INT debug_level = 0) {
+
+/*
+ * Louvain Method with Parallelism and Refinement
+ * https://arxiv.org/pdf/1304.4453
+ * The minimum label heuristics are implemented: https://doi.org/10.1016/j.parco.2015.03.003
+ * iter: There are three phases in the algorithm -- move, merge and refine.
+ * Their max number of iterations are set by iter1, iter2, iter3 respectively.
+ * split: To save memory, split number is 10 by default. When the split number
+ * is larger, the query is closer to sequential Louvain Method, which is slower.
+ * When the split number is 1, the query is parallel, but requires more memory.
+ * output_level = 0: only summary info. Higher levels will print more details.
+ * debug_level = 0 (no debug info,default), 1 (log some info), or 2 (more)
+ *
+ */
+    TYPEDEF TUPLE <INT csize, INT number> Cluster_Count_Tuple;
+    TYPEDEF TUPLE <VERTEX node, INT cid, FLOAT delta_Q> v_delta_Q;
+    HeapAccum<v_delta_Q>(1, delta_Q DESC, cid ASC) @largest_delta_Q;
+        // if delta_Q is the same, select the one with mininal vid
+    MapAccum<INT, FLOAT> @@tot_incident_cluster;   // sum of wt incident to clusters
+    MapAccum<INT, INT> @@cluster_sizes;         // size of a cluster
+    MapAccum<INT, FLOAT> @weight_to_cluster;    // weight from one vertex incident to that cluster
+
+    SumAccum<FLOAT> @@total_wt;                 // total weight of all edges
+    SumAccum<FLOAT> @weight;            // total weight incident to this vertex
+    SumAccum<FLOAT> @cweight;           // total weight incident to this aggregate vertex
+    SumAccum<INT> @uid;                 // which vertex it belongs to
+    SumAccum<INT> @cid;                 // which cluster it belongs to
+    SumAccum<INT> @vid;                 // internal id
+    SumAccum<FLOAT> @delta_Q;           // contribution to the modularity
+    SumAccum<FLOAT> @@modularity;
+    SumAccum<FLOAT> @@modularity2;
+    MapAccum<INT, MapAccum<INT, FLOAT>> @@weight_to_cluster_map;   // calculate edges between communities
+    MapAccum<INT, SetAccum<INT>> @@move_comm; // map of communities that changed its community id
+    MapAccum<INT, MinAccum<VERTEX>> @@represent_map;
+    SetAccum<VERTEX> @@represent_set;
+    MapAccum<INT, FLOAT> @@vertex_map;
+    MapAccum<INT, MapAccum<INT, FLOAT>> @@edge_map;
+
+    // For output
+    FILE f(file_path);
+    HeapAccum<Cluster_Count_Tuple>(100, csize DESC) @@largest_clusters;
+    MapAccum<INT, INT> @@cluster_size_count_map;
+    MapAccum<INT, ListAccum<INT>> @@cluster_size_to_cids_map;
+    MapAccum<INT, ListAccum<VERTEX>> @@cid_to_members_map;
+
+    FLOAT last_modularity = 0;
+    FLOAT last_modularity2 = 0;
+    INT iteration;
+    INT Iter1;
+    FLOAT epsilon = 0.0001;
+    INT iteration2;
+    INT partitions;
+    INT loop;
+
+    partitions = split;
+    CASE WHEN split < 1 THEN
+        partitions = 1;
+    END;
+
+// Initialize: count edges and set a unique cluster ID for each vertex
+    Start (ANY) = {Provider.*};
+
+    S (ANY) = SELECT s
+        FROM Start:s -((referral>|<referral):e)- :t
+        ACCUM @@total_wt += e.num_patient,
+            s.@weight += e.num_patient
+        POST-ACCUM s.@vid = getvid(s),
+            s.@uid = s.@vid,
+            s.@cid = s.@vid  // Label each vertex with its own internal ID
+    ;
+// Special first iteration of Phase 1
+
+    iteration = 1;
+    S = SELECT s
+    FROM Start:s -((referral>|<referral):e)- :t
+    WHERE s.@cid > t.@cid
+    ACCUM s.@largest_delta_Q += v_delta_Q(t, t.@cid, e.num_patient - 2 * s.@weight * s.@weight/ @@total_wt)
+    // weight_to_cluster is just e.num_patient
+    POST-ACCUM INT best_cluster = s.@largest_delta_Q.top().cid,
+        IF s.@largest_delta_Q.size() > 0 AND s.@largest_delta_Q.top().delta_Q > 0 AND s.@cid != best_cluster THEN
+            s.@cid = best_cluster
+        END,
+        s.@largest_delta_Q.clear()
+    ;
+    S = SELECT s
+        FROM Start:s-((referral>|<referral):e)-:t
+        WHERE s.@cid == t.@cid
+        ACCUM @@modularity += e.num_patient - s.@weight * t.@weight / (@@total_wt)
+    ;
+    @@modularity = @@modularity / @@total_wt;
+    IF output_level > 1 THEN
+        PRINT iteration AS Phase1Iter, @@modularity;
+    END;
+    log(debug_level > 0, "[redrain]#move", iteration, @@modularity);
+
+// Phase 1 -- Move
+// For each vertex, calculate the change in modularity FROM adding it to each of the nearby clusters
+// Add vertex to cluster with highest positive change in modularity
+// Repeat the above until no vertices change cluster anymore
+
+    S = SELECT s
+        FROM Start:s
+        ACCUM @@tot_incident_cluster += (s.@cid -> s.@weight)
+    ;
+    iteration = 1;
+    Iter1 = iter1 - 1;
+
+    WHILE (iteration < 2 OR @@modularity - last_modularity > epsilon) LIMIT Iter1 DO
+        iteration = iteration + 1;
+        loop = 0;
+        WHILE (loop < partitions) DO
+            S = SELECT s
+                FROM Start:s -((referral>|<referral):e)- :t
+                WHERE s.@uid % partitions == loop    // for different split
+                    // At least one cluster not singlet(a cluster on its own). If both clusters are singlets, consider only when the label of target is smaller to avoid swap
+                    AND (( abs(s.@weight - @@tot_incident_cluster.get(s.@cid)) > epsilon   // s is not a singlet
+                  OR abs(t.@weight - @@tot_incident_cluster.get(t.@cid)) > epsilon )     // or t is not a singlet
+                  OR (abs(s.@weight - @@tot_incident_cluster.get(s.@cid)) < epsilon      // s is a singlet
+                    AND abs(t.@weight - @@tot_incident_cluster.get(t.@cid)) < epsilon      // t is also a singlet
+                    AND s.@cid > t.@cid) )                                               // consider only when target label is smaller
+                ACCUM s.@weight_to_cluster += (t.@cid -> e.num_patient)
+                POST-ACCUM INT best_cluster = s.@cid,
+                   FLOAT max_delta_Q = 0.0,
+                   FLOAT delta_Q_new = 0.0,
+                   FOREACH (cluster, weightToC) IN s.@weight_to_cluster DO   #would be better if this can be distributed
+                       FLOAT incident = @@tot_incident_cluster.get(cluster),
+                       delta_Q_new = weightToC - 2 * incident * s.@weight/ @@total_wt,
+                       IF delta_Q_new > max_delta_Q OR (abs(delta_Q_new - max_delta_Q) < epsilon AND cluster < best_cluster) THEN   // when delta_Q_new is equal to max_delta_Q, and the cluster label is smaller, also change
+                           max_delta_Q = delta_Q_new,
+                           best_cluster = cluster
+                       END
+                   END,
+                   IF s.@cid != best_cluster THEN
+                       @@tot_incident_cluster += (s.@cid -> (-1 * s.@weight)),
+                       @@tot_incident_cluster += (best_cluster -> s.@weight),
+                       s.@cid = best_cluster
+                   END,
+                   s.@weight_to_cluster.clear()
+            ;
+            loop = loop + 1;
+        END;
+        last_modularity = @@modularity;
+        @@modularity = 0;
+        T1 = SELECT s
+            FROM Provider:s-((referral>|<referral):e)-:t
+            WHERE s.@cid == t.@cid
+            ACCUM @@modularity += e.num_patient - s.@weight * t.@weight / (@@total_wt)
+        ;
+        @@modularity = @@modularity / @@total_wt;
+        IF output_level > 1 THEN
+            PRINT iteration AS Phase1Iter, @@modularity;
+        END;
+        log(debug_level > 0, "[redrain]#move", iteration, @@modularity);
+    END;
+
+// Phase 2 --  Merge
+    iteration2 = 0;
+
+    WHILE (iteration2 < 2 OR @@modularity2 - last_modularity2 > epsilon) LIMIT iter2 DO
+        iteration2 = iteration2 + 1;
+        Start = SELECT s
+            FROM Start:s
+            ACCUM s.@uid = s.@cid
+        ;
+        // Select the vertices with minimal internal id to represent the coarsened graph
+        Start = SELECT s
+            FROM Start:s
+            ACCUM @@represent_map += (s.@cid -> s)
+        ;
+        FOREACH (key, value) IN @@represent_map DO
+            @@represent_set += value;
+        END;
+        represent = {@@represent_set};
+        @@represent_map.clear();
+        @@represent_set.clear();
+        log(debug_level > 0, "[redrain]#2_merge", represent.size());
+
+    // Get @cweight from totalIncident
+        represent = SELECT s
+            FROM represent:s
+            ACCUM s.@cweight = @@tot_incident_cluster.get(s.@uid),
+                  @@cluster_sizes += (s.@cid -> 1);
+
+        log(debug_level > 1, "[redrain]#2_merge", @@weight_to_cluster_map.size());
+        iteration = 0;
+        last_modularity = 0;
+        @@modularity = 0;
+
+        WHILE (iteration < 2 OR @@modularity - last_modularity > epsilon) limit iter1 DO
+            iteration = iteration + 1;
+
+            // Calculate.num_patient incident from vertex to cluster in coarsened graph; change every interation
+            S = SELECT s
+                FROM Start:s -((referral>|<referral):e)-:t
+                WHERE s.@cid != t.@cid AND @@tot_incident_cluster.get(s.@uid) > 0 AND @@tot_incident_cluster.get(t.@cid) > 0   #@@tot_incident_cluster keeps changing, can be 0
+                ACCUM @@weight_to_cluster_map += (s.@uid -> (t.@cid -> e.num_patient))  // from s, incident to some clusters. Not consider the same cluster
+            ;
+            represent = SELECT s
+                FROM represent:s
+                POST-ACCUM INT best_cluster = s.@cid,
+                    FLOAT max_delta_Q = 0.0,
+                    FLOAT delta_Q_new = 0.0,
+                    FOREACH (cluster, weightToC) IN @@weight_to_cluster_map.get(s.@uid) DO
+                        FLOAT incident = @@tot_incident_cluster.get(cluster),
+                        IF @@cluster_sizes.get(s.@cid) == 1 AND @@cluster_sizes.get(cluster) == 1 AND s.@cid < cluster THEN
+                            CONTINUE
+                        END,
+                        delta_Q_new = weightToC - 2 * incident * s.@cweight/ @@total_wt, #total weight should be the same
+                        IF delta_Q_new > max_delta_Q OR abs(delta_Q_new - max_delta_Q) < epsilon AND cluster < best_cluster THEN      // new cluster is smaller then the current best cluster
+                            max_delta_Q = delta_Q_new,
+                            best_cluster = cluster
+                        END
+                    END, // end of FOREACH
+                    IF s.@cid != best_cluster THEN
+                        @@tot_incident_cluster += (s.@cid -> (-1 * s.@cweight)),
+                        @@tot_incident_cluster += (best_cluster -> s.@cweight),
+                        @@move_comm += (s.@uid -> best_cluster),
+                        @@cluster_sizes += (s.@cid -> -1),
+                        @@cluster_sizes += (best_cluster -> 1),
+                        s.@cid = best_cluster
+                    END
+            ;
+            log(debug_level > 1, "[redrain]#2_merge", @@weight_to_cluster_map.size());
+            @@weight_to_cluster_map.clear();
+
+            log(debug_level > 1, "[redrain]#2_move:", @@move_comm.size());
+            // move nodes
+            S = SELECT s
+                FROM Start:s
+                WHERE @@move_comm.containsKey(s.@uid)
+                POST-ACCUM FOREACH v IN @@move_comm.get(s.@uid) DO
+                   s.@cid = v
+                END
+            ;
+            @@move_comm.clear();
+
+            last_modularity = @@modularity;
+            @@modularity = 0;
+
+            S = SELECT s
+                FROM Start:s-((referral>|<referral):e)-:t
+                WHERE s.@cid == t.@cid
+                ACCUM @@modularity += e.num_patient - s.@weight * t.@weight / (@@total_wt)
+            ;
+            @@modularity = @@modularity / @@total_wt;
+            IF output_level > 1 THEN
+                PRINT iteration AS Phase1Iter, @@modularity;
+            END;
+            log(debug_level > 0, "[redrain]#2_move", iteration, @@modularity);
+        END; // Phase 2 inner WHILE
+
+        S = SELECT s
+            FROM represent:s
+            ACCUM s.@cweight = 0;
+        @@cluster_sizes.clear();
+
+        last_modularity2 = @@modularity2;
+        @@modularity2 = @@modularity;
+        IF output_level > 1 THEN
+            PRINT iteration2 AS Phase2Iter, @@modularity2;
+        END;
+        log(debug_level > 0, "[redrain]#2_merge", iteration2, @@modularity2);
+    END; // Phase 2 outer WHILE
+
+// Phase 3 -- Refinement
+    iteration = 0;
+    @@modularity = 0;
+    WHILE (iteration < 2 OR @@modularity - last_modularity > epsilon) LIMIT iter3 DO
+        iteration = iteration + 1;
+        S = SELECT s
+            FROM Start:s -((referral>|<referral):e)- :t
+            WHERE abs(s.@weight - @@tot_incident_cluster.get(s.@cid)) > epsilon OR abs(t.@weight - @@tot_incident_cluster.get(t.@cid)) > epsilon OR (abs(s.@weight - @@tot_incident_cluster.get(s.@cid)) < epsilon AND abs(t.@weight - @@tot_incident_cluster.get(t.@cid)) < epsilon AND s.@cid > t.@cid)   // at least one cluster not only itself, or use smaller label
+            ACCUM s.@weight_to_cluster += (t.@cid -> e.num_patient)
+            POST-ACCUM
+                INT best_cluster = s.@cid,
+                FLOAT max_delta_Q = 0.0,
+                FLOAT delta_Q_new = 0.0,
+                FOREACH (cluster, weightToC) IN s.@weight_to_cluster DO   #would be better if this can be distributed
+                    FLOAT incident = @@tot_incident_cluster.get(cluster),
+                    delta_Q_new = weightToC - 2 * incident * s.@weight/ @@total_wt,
+                    IF delta_Q_new > max_delta_Q OR (abs(delta_Q_new - max_delta_Q) < epsilon AND cluster < best_cluster) THEN   // when delta_Q_new is equal to max_delta_Q, and the cluster label is smaller, also change
+                        max_delta_Q = delta_Q_new,
+                        best_cluster = cluster
+                    END
+                END, // end of FOREACH
+                IF s.@cid != best_cluster THEN
+                    @@tot_incident_cluster += (s.@cid -> (-1 * s.@weight)),
+                    @@tot_incident_cluster += (best_cluster -> s.@weight),
+                    s.@cid = best_cluster
+                END,
+                s.@weight_to_cluster.clear()
+        ;
+        last_modularity = @@modularity;
+        @@modularity = 0;
+        T1 = SELECT s
+             FROM Start:s-((referral>|<referral):e)-:t
+             WHERE s.@cid == t.@cid
+             ACCUM @@modularity += e.num_patient - s.@weight * t.@weight / (@@total_wt);
+        @@modularity = @@modularity / @@total_wt;
+        IF output_level > 1 THEN
+            PRINT iteration AS Phase3Iter, @@modularity;
+        END;
+        log(debug_level > 0, "[redrain]#refine", iteration, @@modularity);
+    END;
+
+// Output the results
+
+    // Iterate through each vertex
+    Start = {ANY};
+    Start = SELECT s FROM Start:s
+        POST-ACCUM
+            // Write per-vertex results
+            IF result_attr == TRUE THEN           // output option: result_attr
+                s.communityId = s.@cid
+            END,
+
+            IF file_path != "" THEN             // output option: file_path
+                f.println(s, s.@cid)
+            END,
+
+            //make maps indexed by cluster id
+            @@cluster_sizes += (s.@cid -> 1),    // make map:(cid -> size)
+            IF output_level > 1 THEN
+                @@cid_to_members_map += (s.@cid -> s) // make map:(cid ->members)
+            END
+    ;
+    log(TRUE, @@cluster_sizes.size());
+    PRINT @@cluster_sizes.size() AS num_of_clusters;      // PRINT num_of_clusters
+
+    IF print_accum THEN                         // output option: print_accum
+        // Iterate through each cluster; make maps indexed by cluster size
+        FOREACH (cid, csize) IN @@cluster_sizes DO
+            @@cluster_size_count_map += (csize -> 1);   // make map: (size -> count)
+            IF output_level > 0 THEN
+                @@cluster_size_to_cids_map += (csize -> cid);//make (csize->cids)
+            END;
+        END;
+
+        FOREACH (csize, num) IN @@cluster_size_count_map DO
+            @@largest_clusters += Cluster_Count_Tuple(csize, num);
+        END;
+        PRINT @@largest_clusters;               // PRINT (size -> count)
+        PRINT @@cluster_sizes;                  // PRINT (cid -> size)
+
+        IF output_level > 0 THEN                // Level 1 or higher
+            PRINT @@cluster_size_to_cids_map;   // PRINT (csize -> cids)
+        END;
+
+        IF output_level > 1 THEN                // Level 2 or higher
+            PRINT @@cid_to_members_map;         // PRINT (cid -> members)
+        END;
+
+        PRINT Start [Start.@cid];               // Level 0 or higher
+    END;
+}

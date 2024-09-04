@@ -1,0 +1,26 @@
+CREATE QUERY get_referral_community(vertex<Provider> input_provider) { 
+/*
+  Get the intra-community referrals for the given Provider's community
+
+  Sample inputs:
+  Helen Su | pro16
+*/
+
+    ListAccum<EDGE> @@edge_list;
+    SumAccum<INT> @@input_community;
+
+    // Get the community ID of the input_provider
+    input = {input_provider};
+    input = SELECT s FROM input:s
+        POST-ACCUM @@input_community += s.communityId;
+
+    // Show all intra-community referrals
+    referral_community = SELECT s FROM Provider:s -(referral>:e)- :t
+        WHERE s.communityId == @@input_community
+            AND s.communityId == t.communityId
+        ACCUM @@edge_list += e;
+
+  PRINT @@input_community;
+  PRINT referral_community;
+  PRINT @@edge_list;
+}

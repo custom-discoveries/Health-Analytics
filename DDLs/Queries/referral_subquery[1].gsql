@@ -1,0 +1,39 @@
+CREATE  QUERY referral_subquery(VERTEX<Provider> input_provider,
+  INT max_days = 30) RETURNS (INT) {
+/*
+  Create referral edges from a given Provider to any other Provider when
+  they treat the same Patient within max_days.
+*/
+
+  OrAccum<BOOL> @visited, @is_referred_claim;
+  ListAccum<DATETIME> @date_list;
+  SumAccum<INT> @@num_referrals_created;
+  INT SECS_IN_DAY = 86400;
+  INT interval_in_secs = max_days * SECS_IN_DAY;
+
+  Start = {input_provider};
+
+  my_claims = SELECT t FROM Start:s -(<submitted_by:e)- :t
+    POST-ACCUM t.@visited = true;
+
+  my_patients = SELECT t FROM my_claims:s -(associated>:e)- :t
+    ACCUM t.@date_list += s.rx_fill_date;
+
+  other_claims = SELECT t FROM my_patients:s -(<associated:e)- :t
+    WHERE t.@visited == false
+    ACCUM
+      FOREACH date IN s.@date_list DO
+        CASE WHEN datetime_diff(date, t.rx_fill_date)
+            BETWEEN 0 AND interval_in_secs THEN
+          t.@is_referred_claim = true
+        END
+      END
+    HAVING t.@is_referred_claim == true;
+
+  other_providers = SELECT t FROM other_claims:s -(submitted_by>:e)- :t
+    POST-ACCUM
+      INSERT INTO referral VALUES(input_provider, t, 1),
+      @@num_referrals_created += 1;
+
+  RETURN @@num_referrals_created;
+}

@@ -1,0 +1,23 @@
+CREATE QUERY _delete_referral_edges(STRING DELETE_ALL_REFERRAL_EDGES="yes") {
+/*
+    Delete all the referral edges. User must set input paramter to "yes"
+    To recreate the edges, run 'infer_all_referrals'.
+*/
+    SumAccum<INT> @@num_referrals_deleted;
+
+    IF lower(DELETE_ALL_REFERRAL_EDGES) == "yes" THEN
+        providers = SELECT s
+            FROM Provider:s -(referral>:e) -:t
+            ACCUM
+                DELETE (e),
+                @@num_referrals_deleted += 1;
+        PRINT @@num_referrals_deleted;
+        STRING msg = "NOTE: It may take a few seconds after the query finishes for the deletions to take effect.";
+        providers = SELECT s FROM Provider:s
+        POST-ACCUM s.pageRank = 0, s.communityId = 0;
+    ELSE
+        PRINT @@num_referrals_deleted;
+        STRING msg = "No action. Set parameter to 'yes' to delete edges.";
+        PRINT msg;
+    END;
+}

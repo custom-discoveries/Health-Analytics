@@ -1,0 +1,14 @@
+CREATE QUERY ex_main_query(INT max_days = 30) {
+/*
+  Create referral edges from any Provider to any other Provider when
+  they treat the same Patient within max_days.
+*/
+
+  SumAccum<INT> @@num_referrals_created;
+
+  all_Providers = SELECT s FROM Provider:s
+    ACCUM
+      @@num_referrals_created += referral_subquery(s, max_days);
+
+  PRINT @@num_referrals_created;
+}

@@ -1,0 +1,31 @@
+#
+DROP JOB ALL
+DROP GRAPH Health_Analytics_Graph
+CREATE GRAPH Health_Analytics_Graph(*)
+USE Graph Health_Analytics_Graph
+set exit_on_error = "false"
+#
+CREATE SCHEMA_CHANGE JOB Health_Analytics_Graph_Schema_Job FOR GRAPH Health_Analytics_Graph {
+# Color:#f356ac icon:strategic
+  ADD VERTEX Specialty(PRIMARY_ID id STRING) WITH STATS="OUTDEGREE_BY_EDGETYPE", PRIMARY_ID_AS_ATTRIBUTE="true";
+
+# Color:#f31e0b icon:workspace
+  ADD VERTEX SubSpecialty(PRIMARY_ID id STRING) WITH STATS="OUTDEGREE_BY_EDGETYPE", PRIMARY_ID_AS_ATTRIBUTE="true";
+
+# Color: #214af3 icon: analytics
+  ADD VERTEX Provider(PRIMARY_ID Provider_id STRING, pageRank FLOAT, communityId INT) WITH STATS="OUTDEGREE_BY_EDGETYPE", PRIMARY_ID_AS_ATTRIBUTE="true";
+
+# Color: #048a01 icon: book
+  ADD VERTEX Claim(PRIMARY_ID Claim_id STRING, rx_fill_date DATETIME, ICD10Code STRING, ICD10CodeDescription STRING, CodeGroupTitle STRING) WITH STATS="OUTDEGREE_BY_EDGETYPE", PRIMARY_ID_AS_ATTRIBUTE="true";
+
+# Color: #bc09f0 icon: pin
+  ADD VERTEX Patient(PRIMARY_ID Patient_id STRING) WITH STATS="OUTDEGREE_BY_EDGETYPE", PRIMARY_ID_AS_ATTRIBUTE="true";
+#
+  ADD DIRECTED EDGE submitted_by(FROM Claim, TO Provider) WITH REVERSE_EDGE="reverse_submitted_by";
+  ADD DIRECTED EDGE associated(FROM Claim, TO Patient) WITH REVERSE_EDGE="reverse_associated";
+  ADD DIRECTED EDGE specialty_subspecialty(FROM Specialty, TO SubSpecialty) WITH REVERSE_EDGE="reverse_specialty_subspecialty";
+  ADD DIRECTED EDGE subspecialty_provider(FROM Provider, TO SubSpecialty) WITH REVERSE_EDGE="reverse_subspecialty_provider";
+  ADD DIRECTED EDGE referral(FROM Provider, TO Provider, num_patient INT DEFAULT "0") WITH REVERSE_EDGE="reverse_referral";
+  }
+RUN SCHEMA_CHANGE JOB Health_Analytics_Graph_Schema_Job
+DROP JOB Health_Analytics_Graph_Schema_Job

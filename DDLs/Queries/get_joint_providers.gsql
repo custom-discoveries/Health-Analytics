@@ -1,0 +1,46 @@
+CREATE QUERY get_joint_providers(VERTEX<Provider> input_provider)
+{
+/*
+    Get Providers who have treated the same patients as a given Provider
+
+    Sample inputs:
+    input_provider: Helen Su | Douglas Thomas | pro16
+
+    Starting with an "input_provider",
+    (1) Get the connected claims, accumulate edges, and mark claims as visited
+    (2) Get the patients connected to claims and accumulate the edges
+    (3) Get the claims connected to the patients that have not been visited
+    and accumulate the edges
+    (4) Get the providers connected to the claims and accumulate the edges
+    (5) Display the providers and edges
+    Provider -(<submitted_by)- Claim -(associated>)- Patient -(<associated)-
+      Claim -(submitted_by>)- Provider
+*/
+
+    ListAccum<EDGE> @@edge_list; // list will have all edges traversed
+    OrAccum<BOOL> @visited;
+
+    start = {input_provider};
+
+    claims = SELECT t // select connected claims
+        FROM start:s-(<submitted_by:e)-:t
+        ACCUM @@edge_list += e
+        POST-ACCUM t.@visited = TRUE; // mark the selected claims as visited
+
+    patients = SELECT t // select connected patients
+        FROM claims:s-(associated>:e)-:t
+        ACCUM @@edge_list +=e;
+
+    other_claims = SELECT t
+        FROM patients:s-(<associated:e)-:t
+        WHERE t.@visited == FALSE // select claims not previously visited
+        ACCUM @@edge_list +=e;
+
+    joint_providers = SELECT t  // select connected providers
+        FROM other_claims-(submitted_by>:e)-:t
+        ACCUM @@edge_list +=e;
+
+    PRINT patients.size();
+    PRINT joint_providers.size();
+    PRINT joint_providers, @@edge_list;
+}

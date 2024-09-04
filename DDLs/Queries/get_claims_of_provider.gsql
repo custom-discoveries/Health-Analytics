@@ -1,0 +1,24 @@
+CREATE QUERY get_claims_of_provider(VERTEX<Provider> input_provider) {
+/*
+    Get the Claims of a given Provider
+
+    Sample inputs:
+    input_provider: Helen Su | pro30 | pro13
+
+    Starting from an "input_provider",
+    (1) Grab all the provider's claims
+    Provider -(<submitted_by)- Claim
+    (2) Print the claims and submitted_by edges
+*/
+
+    ListAccum<EDGE> @@submitted_by_list;
+
+    start = {input_provider};
+
+    claims = SELECT t
+      // select claims connected to the input provider
+        FROM start:s-(<submitted_by:e)-:t
+        ACCUM @@submitted_by_list += e;
+
+    PRINT claims, @@submitted_by_list;
+}

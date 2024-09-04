@@ -1,0 +1,32 @@
+CREATE QUERY get_k_hop_neighbors(INT k=1, VERTEX input) {
+/*
+    Get all the vertices within k hops of a source vertex
+
+    Sample inputs:
+    k: any number > 0
+    input: (Claim, c9921) | (SubSpecialty, Cardiology) | (Provider, pro78)
+
+    Starting with the "input",
+    (1) Traverse to all the vertices connected which was not visited
+    (2) Accumulate the vertices and edges
+    (3) Mark the vertices as visited
+    (4) Repeat the traversal k times
+*/
+
+    OrAccum<BOOL> @visited;
+    ListAccum<VERTEX> @@vertex_list;
+    ListAccum<EDGE> @@edge_list;
+
+    start = {input};
+
+    WHILE start.size() > 0 LIMIT k DO /* stops either when there are no
+      vertices or when reaching k */
+        start = SELECT t
+            FROM start-(:e)-:t // visit all connected vertices
+            WHERE t.@visited == FALSE // vertex must be new
+            ACCUM @@vertex_list += t, @@edge_list += e // add to global lists
+            POST-ACCUM t.@visited = TRUE; // mark vertices visited
+    END;
+
+    PRINT @@vertex_list, @@edge_list;
+}
