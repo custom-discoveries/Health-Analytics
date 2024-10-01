@@ -1,7 +1,5 @@
 #
 DROP JOB ALL
-DROP GRAPH Health_Analytics_Graph
-CREATE GRAPH Health_Analytics_Graph(*)
 USE Graph Health_Analytics_Graph
 set exit_on_error = "false"
 #
