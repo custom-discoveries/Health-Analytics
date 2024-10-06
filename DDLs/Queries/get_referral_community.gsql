@@ -1,4 +1,4 @@
-CREATE QUERY get_referral_community(vertex<Provider> input_provider) { 
+CREATE QUERY get_referral_community(vertex<Provider> input_provider) {
 /*
   Get the intra-community referrals for the given Provider's community
 

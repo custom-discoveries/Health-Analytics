@@ -1,8 +1,11 @@
 #
+# Copyright (c) 2024, Custom Discoveries Inc.
+# All rights reserved.
+#
 # Example of loading Edges from one data load file
 #
 Use Graph Health_Analytics_Graph
-DROP JOB Health_Analytics_Graph_Edge_Job
+set exit_on_error = "false"
 CREATE LOADING JOB Health_Analytics_Graph_Edge_Job FOR GRAPH Health_Analytics_Graph {
 DEFINE FILENAME DS1 = "./GraphData/claim_associated_with_patient.csv";
 DEFINE FILENAME DS2 = "./GraphData/specialties_subspecialties.csv";
